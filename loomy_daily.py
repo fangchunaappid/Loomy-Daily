@@ -60,7 +60,9 @@ SUCCESS_CODE = "000000"
 AUTH_ERROR_CODES = ("020002", "100002")
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loomy_onboarding.json")
+STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loomy_stats.json")
 TOTAL_POINTS = 10000
+SESSION_WARN_DAYS = 2
 
 TASKS = [
     ("初识 Loomy", "first_message", "发送你的第一条消息", 500),
@@ -154,14 +156,21 @@ def first_login(session_token):
         raise RuntimeError("登录状态失效，重新登录一下吧该账号")
     if code != SUCCESS_CODE:
         message = upstream_message(payload) or ("code=%s" % code)
-        return False, "每日积分刷新失败：%s" % message
+        return False, "每日积分刷新失败：%s" % message, None, None
     balance = None
+    granted = None
     data = payload.get("data")
     if isinstance(data, dict):
         balance = data.get("dailyBalance")
         if balance is None and isinstance(data.get("data"), dict):
             balance = data["data"].get("dailyBalance")
-    return True, ("每日赠送积分已刷新（当前 %s）" % balance) if balance is not None else "每日赠送积分已刷新"
+        for key in ("todayPoints", "grantedPoints", "increasePoints",
+                    "dailyPoints", "awardPoints", "increase", "grant"):
+            if data.get(key) is not None:
+                granted = data[key]
+                break
+    message = ("每日赠送积分已刷新（当前 %s）" % balance) if balance is not None else "每日赠送积分已刷新"
+    return True, message, balance, granted
 
 
 def token_fp(session_token):
@@ -185,6 +194,49 @@ def save_state(state):
             json.dump(state, handle, ensure_ascii=False, indent=2)
     except Exception as error:
         log("⚠️ 新手任务结算记录写入失败: %s" % error)
+
+
+def load_stats():
+    try:
+        with open(STATS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_stats(stats):
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(stats, handle, ensure_ascii=False, indent=2)
+    except Exception as error:
+        log("⚠️ 签到统计写入失败: %s" % error)
+
+
+def parse_expiry(value):
+    """解析账号行的第 3 段到期时间（Unix 毫秒或 YYYY-MM-DD），返回 (date_str, days_left)。"""
+    value = str(value or "").strip()
+    if not value:
+        return None, None
+    try:
+        if value.isdigit():
+            stamp = int(value) / 1000 if int(value) > 10**12 else int(value)
+            expire_date = time.strftime("%Y-%m-%d", time.localtime(stamp))
+        else:
+            expire_date = time.strftime("%Y-%m-%d", time.strptime(value, "%Y-%m-%d"))
+        left = (time.mktime(time.strptime(expire_date, "%Y-%m-%d"))
+                - time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))) / 86400
+        return expire_date, int(left)
+    except Exception:
+        return None, None
+
+
+def expiry_warning(account):
+    expire_date, days_left = parse_expiry(account.get("expires"))
+    if days_left is None or days_left > SESSION_WARN_DAYS:
+        return ""
+    return ("⏰ session 仅剩 %d 天到期（%s），请重新登录获取" % (days_left, expire_date)) \
+        if days_left >= 0 else "⏰ session 已于 %s 过期，请重新登录" % expire_date
 
 
 def settled_snapshot(state, session_token):
@@ -524,10 +576,43 @@ def log_task_list(payload):
 
 
 def do_checkin(account):
-    success, message = first_login(account["session"])
+    fingerprint = token_fp(account["session"])
+    today = time.strftime("%Y-%m-%d")
+    stats = load_stats()
+    record = stats.get(fingerprint) if isinstance(stats.get(fingerprint), dict) else {}
+
+    # 今日已签：本地记录当天已成功刷新过，直接跳过
+    if record.get("lastDate") == today and not FORCE_REFRESH:
+        summary = ("今日已签（跳过）｜累计签到 %s 天｜累计签到积分 +%s｜剩余积分 %s"
+                   % (record.get("checkinDays", 0), record.get("cumPoints", 0),
+                      record.get("lastBalance", "未知")))
+        return True, summary
+
+    success, message, balance, granted = first_login(account["session"])
     if not success:
-        return False, message
+        return False, message  # 签到失败，带上游原因
     parts = [message]
+
+    if granted is None and balance is not None and record.get("lastBalance") is not None:
+        try:
+            granted = max(0, int(balance) - int(record["lastBalance"]))
+        except Exception:
+            granted = None
+
+    record.update({
+        "checkinDays": int(record.get("checkinDays") or 0) + 1,
+        "firstDate": record.get("firstDate") or today,
+        "lastDate": today,
+        "lastBalance": balance if balance is not None else record.get("lastBalance"),
+        "cumPoints": int(record.get("cumPoints") or 0)
+                     + (int(granted) if granted not in (None, "") else 0),
+    })
+    stats[fingerprint] = record
+    save_stats(stats)
+    parts.append("累计签到 %d 天｜累计签到积分 +%d｜剩余积分 %s"
+                 % (record["checkinDays"], record["cumPoints"],
+                    record["lastBalance"] if record["lastBalance"] is not None else "未知"))
+
     if not NO_ONBOARDING:
         try:
             newly, failed, payload = claim_onboarding(account["session"], refresh=FORCE_REFRESH)
@@ -676,7 +761,8 @@ def parse_accounts(raw):
         else:
             note, session_token = "账号%d" % index, parts[0]
         if session_token:
-            accounts.append({"note": note or ("账号%d" % index), "session": session_token})
+            accounts.append({"note": note or ("账号%d" % index), "session": session_token,
+                             "expires": parts[2] if len(parts) >= 3 else ""})
     return accounts
 
 
@@ -765,10 +851,15 @@ def main():
             else:
                 success, message = do_checkin(account)
                 log("   %s %s" % ("✅" if success else "ℹ️", message))
-                report.append("账号%d %s: %s %s" % (index, account["note"], "✅" if success else "ℹ️", message))
+                report.append("账号%d %s: %s %s"
+                              % (index, account["note"], "✅" if success else "ℹ️", message))
         except Exception as error:
             log("   ❌ 异常: %s" % error)
             report.append("账号%d %s: ❌ %s" % (index, account["note"], error))
+        warn = expiry_warning(account)
+        if warn:
+            log("   %s" % warn)
+            report[-1] += " " + warn
         time.sleep(1.5)
 
     title = "🌙 Loomy 签到报告" if mode == "checkin" else "🌙 Loomy 任务报告"
