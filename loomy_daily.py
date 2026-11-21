@@ -80,6 +80,8 @@ ONLY = None
 NO_ONBOARDING = False
 NO_NOTIFY = False
 FORCE_REFRESH = False
+ANY_NEW_CHECKIN = []
+ANY_FAIL = []
 
 
 def log(msg):
@@ -618,11 +620,11 @@ def do_checkin(account):
         summary = ("今日已签（跳过）｜累计签到 %s 天｜累计签到积分 +%s｜剩余积分 %s"
                    % (record.get("checkinDays", 0), record.get("cumPoints", 0),
                       remaining if remaining is not None else "未知"))
-        return True, summary
+        return True, summary, True
 
     success, message, balance, granted = first_login(account["session"])
     if not success:
-        return False, message  # 签到失败，带上游原因
+        return False, message, False  # 签到失败，带上游原因
     parts = [message]
 
     prev_daily = record.get("lastDaily")
@@ -634,7 +636,6 @@ def do_checkin(account):
         except Exception:
             granted = None
 
-    remaining = _remaining_points(account["session"], record, fallback=balance)
     record.update({
         "checkinDays": int(record.get("checkinDays") or 0) + 1,
         "firstDate": record.get("firstDate") or today,
@@ -674,7 +675,7 @@ def do_checkin(account):
                 parts.append("新手任务待处理 %d 项" % payload.get("unclaimed", 0))
         except Exception as error:
             parts.append("新手任务查询失败：%s" % error)
-    return True, "；".join(parts)
+    return True, "；".join(parts), False
 
 
 # ---------- 推送 ----------
@@ -884,13 +885,20 @@ def main():
                     log("   ❌ %s 领取失败: %s" % (claim_key, payload.get("error") or "未知错误"))
                     report.append("账号%d %s: ❌ %s 领取失败" % (index, account["note"], claim_key))
             else:
-                success, message = do_checkin(account)
+                success, message, skipped = do_checkin(account)
                 log("   %s %s" % ("✅" if success else "ℹ️", message))
                 report.append("账号%d %s: %s %s"
                               % (index, account["note"], "✅" if success else "ℹ️", message))
+                if mode == "checkin":
+                    if not skipped:
+                        ANY_NEW_CHECKIN.append(True)
+                    if not success:
+                        ANY_FAIL.append(True)
         except Exception as error:
             log("   ❌ 异常: %s" % error)
             report.append("账号%d %s: ❌ %s" % (index, account["note"], error))
+            if mode == "checkin":
+                ANY_FAIL.append(True)
         warn = expiry_warning(account)
         if warn:
             log("   %s" % warn)
@@ -900,6 +908,9 @@ def main():
     title = "🌙 Loomy 签到报告" if mode == "checkin" else "🌙 Loomy 任务报告"
     summary = title + "\n" + "\n".join(report) + "\n🕐 " + time.strftime("%Y-%m-%d %H:%M")
     log(summary)
+    if mode == "checkin" and not NO_NOTIFY and not ANY_NEW_CHECKIN and not ANY_FAIL:
+        log("（所有账号今日均已签到，跳过推送）")
+        return
     if not NO_NOTIFY:
         notify_all(title, summary)
 
