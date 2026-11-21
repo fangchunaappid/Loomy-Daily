@@ -54,6 +54,7 @@ except Exception:
 
 BASE = "https://loomyad.xunfei.cn"
 FIRST_LOGIN_PATH = "/api/v1/points/first-login"
+BALANCE_PATH = "/api/v1/points/balance"
 TASKS_PATH = "/api/v1/onboarding/tasks"
 COMPLETE_PATH = "/api/v1/onboarding/tasks/complete"
 SUCCESS_CODE = "000000"
@@ -171,6 +172,19 @@ def first_login(session_token):
                 break
     message = ("每日赠送积分已刷新（当前 %s）" % balance) if balance is not None else "每日赠送积分已刷新"
     return True, message, balance, granted
+
+
+def get_balance(session_token):
+    """查询账户积分：balance=基础积分，dailyBalance=每日积分，availableBalance=可用总积分。"""
+    response = request("GET", BASE + BALANCE_PATH, headers=token_headers(session_token))
+    payload = json_of(response)
+    code = business_code(payload)
+    if response.status_code in (401, 403) or code in AUTH_ERROR_CODES:
+        raise RuntimeError("登录状态失效，重新登录一下吧该账号")
+    if code != SUCCESS_CODE:
+        return {}
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 def token_fp(session_token):
@@ -575,6 +589,22 @@ def log_task_list(payload):
                                        row.get("points")))
 
 
+def _remaining_points(session_token, record, fallback=None):
+    """查账户积分，返回 (可用总积分, 每日积分)。失败时回退上次记录或签到返回值。"""
+    try:
+        data = get_balance(session_token)
+        available = data.get("availableBalance")
+        if available is None:
+            available = data.get("dailyBalance")
+        if available is not None:
+            record["lastBalance"] = available
+            record["lastDaily"] = data.get("dailyBalance")
+            return available, data.get("dailyBalance")
+    except Exception:
+        pass
+    return record.get("lastBalance", fallback), record.get("lastDaily")
+
+
 def do_checkin(account):
     fingerprint = token_fp(account["session"])
     today = time.strftime("%Y-%m-%d")
@@ -583,9 +613,11 @@ def do_checkin(account):
 
     # 今日已签：本地记录当天已成功刷新过，直接跳过
     if record.get("lastDate") == today and not FORCE_REFRESH:
+        remaining, _daily = _remaining_points(account["session"], record)
+        save_stats(stats)
         summary = ("今日已签（跳过）｜累计签到 %s 天｜累计签到积分 +%s｜剩余积分 %s"
                    % (record.get("checkinDays", 0), record.get("cumPoints", 0),
-                      record.get("lastBalance", "未知")))
+                      remaining if remaining is not None else "未知"))
         return True, summary
 
     success, message, balance, granted = first_login(account["session"])
@@ -593,17 +625,20 @@ def do_checkin(account):
         return False, message  # 签到失败，带上游原因
     parts = [message]
 
-    if granted is None and balance is not None and record.get("lastBalance") is not None:
+    prev_daily = record.get("lastDaily")
+    remaining, daily_balance = _remaining_points(account["session"], record, fallback=balance)
+
+    if granted is None and daily_balance is not None and prev_daily is not None:
         try:
-            granted = max(0, int(balance) - int(record["lastBalance"]))
+            granted = max(0, int(daily_balance) - int(prev_daily))
         except Exception:
             granted = None
 
+    remaining = _remaining_points(account["session"], record, fallback=balance)
     record.update({
         "checkinDays": int(record.get("checkinDays") or 0) + 1,
         "firstDate": record.get("firstDate") or today,
         "lastDate": today,
-        "lastBalance": balance if balance is not None else record.get("lastBalance"),
         "cumPoints": int(record.get("cumPoints") or 0)
                      + (int(granted) if granted not in (None, "") else 0),
     })
@@ -611,7 +646,7 @@ def do_checkin(account):
     save_stats(stats)
     parts.append("累计签到 %d 天｜累计签到积分 +%d｜剩余积分 %s"
                  % (record["checkinDays"], record["cumPoints"],
-                    record["lastBalance"] if record["lastBalance"] is not None else "未知"))
+                    remaining if remaining is not None else "未知"))
 
     if not NO_ONBOARDING:
         try:
