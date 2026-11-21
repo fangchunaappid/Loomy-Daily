@@ -626,6 +626,18 @@ def notify_dingtalk(title, content):
         return False
 
 
+def notify_feishu(title, content):
+    hook = _env("FEISHU_WEBHOOK")
+    if not hook:
+        return False
+    try:
+        answer = post_json(hook, {"msg_type": "text",
+                                  "content": {"text": ("%s\n%s" % (title, content))[:9000]}})
+        return json_of(answer).get("code") == 0 or json_of(answer).get("StatusCode") == 0
+    except Exception:
+        return False
+
+
 def notify_ql(title, content):
     try:
         from notify import send as panel_send
@@ -648,7 +660,7 @@ def notify_ql(title, content):
 
 
 def notify_all(title, content):
-    handlers = (notify_pushplus, notify_bark, notify_wecom, notify_dingtalk, notify_ql)
+    handlers = (notify_pushplus, notify_bark, notify_wecom, notify_dingtalk, notify_feishu, notify_ql)
     if not any(handler(title, content) for handler in handlers):
         log("（未配置推送渠道，本次只记录日志）")
 
