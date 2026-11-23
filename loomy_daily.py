@@ -159,21 +159,15 @@ def first_login(session_token):
         raise RuntimeError("登录状态失效，重新登录一下吧该账号")
     if code != SUCCESS_CODE:
         message = upstream_message(payload) or ("code=%s" % code)
-        return False, "每日积分刷新失败：%s" % message, None, None
-    balance = None
-    granted = None
+        return False, "每日积分刷新失败：%s" % message, None
     data = payload.get("data")
-    if isinstance(data, dict):
-        balance = data.get("dailyBalance")
-        if balance is None and isinstance(data.get("data"), dict):
-            balance = data["data"].get("dailyBalance")
-        for key in ("todayPoints", "grantedPoints", "increasePoints",
-                    "dailyPoints", "awardPoints", "increase", "grant"):
-            if data.get(key) is not None:
-                granted = data[key]
-                break
-    message = ("每日赠送积分已刷新（当前 %s）" % balance) if balance is not None else "每日赠送积分已刷新"
-    return True, message, balance, granted
+    if not isinstance(data, dict):
+        data = {}
+    current = data.get("currentBalance")
+    if current is None:
+        current = data.get("availableBalance")
+    message = ("每日赠送积分已刷新（当前可用 %s）" % current) if current is not None else "每日赠送积分已刷新"
+    return True, message, data
 
 
 def get_balance(session_token):
@@ -592,7 +586,7 @@ def log_task_list(payload):
 
 
 def _remaining_points(session_token, record, fallback=None):
-    """查账户积分，返回 (可用总积分, 每日积分)。失败时回退上次记录或签到返回值。"""
+    """查账户积分，返回 (可用总积分, 每日额度, 基础积分)。失败时回退上次记录。"""
     try:
         data = get_balance(session_token)
         available = data.get("availableBalance")
@@ -601,10 +595,10 @@ def _remaining_points(session_token, record, fallback=None):
         if available is not None:
             record["lastBalance"] = available
             record["lastDaily"] = data.get("dailyBalance")
-            return available, data.get("dailyBalance")
+            return available, data.get("dailyBalance"), data.get("balance")
     except Exception:
         pass
-    return record.get("lastBalance", fallback), record.get("lastDaily")
+    return record.get("lastBalance", fallback), record.get("lastDaily"), None
 
 
 def do_checkin(account):
@@ -615,39 +609,58 @@ def do_checkin(account):
 
     # 今日已签：本地记录当天已成功刷新过，直接跳过
     if record.get("lastDate") == today and not FORCE_REFRESH:
-        remaining, _daily = _remaining_points(account["session"], record)
+        remaining, daily_left, permanent = _remaining_points(account["session"], record)
+        cum = int(record.get("cumPoints") or 0)
+        days = int(record.get("checkinDays") or 0)
+        if cum == 0 and days > 0:  # 兼容旧统计，按签到天数回填
+            cum = days * 5000
+            record["cumPoints"] = cum
         save_stats(stats)
-        summary = ("今日已签（跳过）｜累计签到 %s 天｜累计签到积分 +%s｜剩余积分 %s"
-                   % (record.get("checkinDays", 0), record.get("cumPoints", 0),
-                      remaining if remaining is not None else "未知"))
+        summary = ("今日已签（跳过）｜累计签到 %s 天｜累计签到积分 +%s｜剩余积分 %s（基础 %s＋今日 %s）"
+                   % (days, cum,
+                      remaining if remaining is not None else "未知",
+                      permanent if permanent is not None else "未知",
+                      daily_left if daily_left is not None else "未知"))
         return True, summary, True
 
-    success, message, balance, granted = first_login(account["session"])
+    success, message, data = first_login(account["session"])
     if not success:
         return False, message, False  # 签到失败，带上游原因
     parts = [message]
 
-    prev_daily = record.get("lastDaily")
-    remaining, daily_balance = _remaining_points(account["session"], record, fallback=balance)
+    # Loomy 积分模型：每日发放 dailyQuota 当日额度（不过夜），基础积分仅随消费变化。
+    # 因此"累计签到积分"按每天成功签到 +dailyQuota 自行累计；"剩余积分"用可用总积分。
+    quota = int(data.get("dailyQuota") or 0) or 5000
+    remaining = data.get("currentBalance")
+    if remaining is None:
+        remaining = data.get("availableBalance")
+    if remaining is None:
+        remaining = data.get("dailyBalance")
+    permanent = data.get("permanentBalance")
+    daily_left = data.get("dailyBalance")
+    if daily_left is None:
+        daily_left = data.get("quota")
 
-    if granted is None and daily_balance is not None and prev_daily is not None:
-        try:
-            granted = max(0, int(daily_balance) - int(prev_daily))
-        except Exception:
-            granted = None
+    # 兼容旧统计：cumPoints 未累计过时，按已有签到天数回填基数
+    cum_base = int(record.get("cumPoints") or 0)
+    if cum_base == 0 and int(record.get("checkinDays") or 0) > 0:
+        cum_base = int(record["checkinDays"]) * quota
 
     record.update({
         "checkinDays": int(record.get("checkinDays") or 0) + 1,
         "firstDate": record.get("firstDate") or today,
         "lastDate": today,
-        "cumPoints": int(record.get("cumPoints") or 0)
-                     + (int(granted) if granted not in (None, "") else 0),
+        "lastBalance": remaining if remaining is not None else record.get("lastBalance"),
+        "lastDaily": daily_left,
+        "cumPoints": cum_base + quota,
     })
     stats[fingerprint] = record
     save_stats(stats)
-    parts.append("累计签到 %d 天｜累计签到积分 +%d｜剩余积分 %s"
+    parts.append("累计签到 %d 天｜累计签到积分 +%d｜剩余积分 %s（基础 %s＋今日 %s）"
                  % (record["checkinDays"], record["cumPoints"],
-                    remaining if remaining is not None else "未知"))
+                    remaining if remaining is not None else "未知",
+                    permanent if permanent is not None else "未知",
+                    daily_left if daily_left is not None else "未知"))
 
     if not NO_ONBOARDING:
         try:
