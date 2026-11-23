@@ -4,7 +4,7 @@
     "firstDate": "2026-11-21",
     "lastDate": "2026-11-23",
     "lastBalance": 25000,
-    "cumPoints": 15000,
+    "cumPoints": 0,
     "lastDaily": 5000
   },
   "e7903bcc69df56df": {
@@ -12,7 +12,7 @@
     "firstDate": "2026-11-21",
     "lastDate": "2026-11-23",
     "lastBalance": 30000,
-    "cumPoints": 15000,
+    "cumPoints": 0,
     "lastDaily": 5000
   },
   "6343051f1e9dea5c": {
@@ -20,7 +20,7 @@
     "firstDate": "2026-11-21",
     "lastDate": "2026-11-23",
     "lastBalance": 30000,
-    "cumPoints": 15000,
+    "cumPoints": 0,
     "lastDaily": 5000
   }
 }
