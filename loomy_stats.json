@@ -1,26 +1,26 @@
 {
   "7a3d431e565207e6": {
-    "checkinDays": 7,
+    "checkinDays": 8,
     "firstDate": "2026-11-21",
-    "lastDate": "2026-11-27",
+    "lastDate": "2026-11-28",
     "lastBalance": 25000,
-    "cumPoints": 35000,
+    "cumPoints": 40000,
     "lastDaily": 5000
   },
   "e7903bcc69df56df": {
-    "checkinDays": 7,
+    "checkinDays": 8,
     "firstDate": "2026-11-21",
-    "lastDate": "2026-11-27",
+    "lastDate": "2026-11-28",
     "lastBalance": 30000,
-    "cumPoints": 35000,
+    "cumPoints": 40000,
     "lastDaily": 5000
   },
   "6343051f1e9dea5c": {
-    "checkinDays": 7,
+    "checkinDays": 8,
     "firstDate": "2026-11-21",
-    "lastDate": "2026-11-27",
+    "lastDate": "2026-11-28",
     "lastBalance": 30000,
-    "cumPoints": 35000,
+    "cumPoints": 40000,
     "lastDaily": 5000
   }
 }
